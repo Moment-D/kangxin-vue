@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>手势贪吃蛇 (MediaPipe)</title>
+    <!-- 引入 MediaPipe Hands 和 Camera Utils -->
+    <!-- 替换为本地路径 -->
+    <script src="./libs/mediapipe/hands.js" crossorigin="anonymous"></script>
+    <script src="./libs/mediapipe/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="./libs/mediapipe/control_utils.js" crossorigin="anonymous"></script>
+    <script src="./libs/mediapipe/drawing_utils.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            overflow: hidden;
+            font-family: 'Arial', sans-serif;
+        }
+
+        /* 游戏容器，让Canvas全屏 */
+        #game-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* 隐藏原始视频元素，我们画在Canvas上 */
+        #input_video {
+            display: none;
+        }
+
+        /* Canvas 覆盖全屏 */
+        #output_canvas {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            /* 移动端防触摸默认行为 */
+            touch-action: none;
+        }
+
+        /* UI 覆盖层 */
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            z-index: 10;
+            pointer-events: none; /* 让点击穿透 */
+        }
+
+        .score-board {
+            font-size: 24px;
+            font-weight: bold;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px 20px;
+            border-radius: 20px;
+            border: 2px solid #fff;
+        }
+
+        /* 加载提示 */
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 20px;
+            text-align: center;
+            z-index: 20;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="loading">正在加载 AI 模型...<br>请允许摄像头权限</div>
+    
+    <div id="ui-layer">
+        <div class="score-board">分数: <span id="score">0</span></div>
+    </div>
+
+    <!-- MediaPipe 需要的视频源 -->
+    <video id="input_video" playsinline></video>
+    <!-- 绘制游戏的画布 -->
+    <canvas id="output_canvas"></canvas>
+</div>
+
+<script>
+    // --- 变量初始化 ---
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const scoreElement = document.getElementById('score');
+    const loadingElement = document.getElementById('loading');
+
+    // 游戏状态
+    let score = 0;
+    let snake = []; // 存储蛇身体节点 {x, y}
+    let snakeLength = 20; // 初始长度
+    let snakeRadius = 15; // 蛇身半径
+    let apple = { x: 0, y: 0, radius: 10 }; // 苹果
+    let fingerPos = { x: 0, y: 0 }; // 当前平滑后的手指位置
+    
+    // 线性插值系数，用于让蛇头跟随手指更平滑 (0.1 - 1.0)
+    const LERP_FACTOR = 0.2; 
+    let isGameActive = false;
+
+    // --- 初始化 Canvas 尺寸 ---
+    function resizeCanvas() {
+        canvasElement.width = window.innerWidth;
+        canvasElement.height = window.innerHeight;
+        // 如果还没有苹果，生成一个
+        if (apple.x === 0 && apple.y === 0) respawnApple();
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // --- 游戏逻辑函数 ---
+
+    // 线性插值函数 (Linear Interpolation)
+    function lerp(start, end, amt) {
+        return (1 - amt) * start + amt * end;
+    }
+
+    // 生成随机位置的苹果
+    function respawnApple() {
+        const padding = 50;
+        apple.x = Math.random() * (canvasElement.width - padding * 2) + padding;
+        apple.y = Math.random() * (canvasElement.height - padding * 2) + padding;
+    }
+
+    // 绘制苹果
+    function drawApple() {
+        canvasCtx.beginPath();
+        canvasCtx.arc(apple.x, apple.y, apple.radius + 5 * Math.sin(Date.now() / 200), 0, 2 * Math.PI);
+        canvasCtx.fillStyle = '#ff4444';
+        canvasCtx.fill();
+        canvasCtx.strokeStyle = '#fff';
+        canvasCtx.lineWidth = 2;
+        canvasCtx.stroke();
+        
+        // 叶子
+        canvasCtx.beginPath();
+        canvasCtx.moveTo(apple.x, apple.y - apple.radius);
+        canvasCtx.lineTo(apple.x + 5, apple.y - apple.radius - 10);
+        canvasCtx.strokeStyle = '#4caf50';
+        canvasCtx.stroke();
+    }
+
+    // 更新和绘制蛇
+    function updateAndDrawSnake(targetX, targetY) {
+        // 1. 平滑移动蛇头 (Lerp)
+        // 如果是第一帧，直接定位
+        if (fingerPos.x === 0 && fingerPos.y === 0) {
+            fingerPos.x = targetX;
+            fingerPos.y = targetY;
+        } else {
+            fingerPos.x = lerp(fingerPos.x, targetX, LERP_FACTOR);
+            fingerPos.y = lerp(fingerPos.y, targetY, LERP_FACTOR);
+        }
+
+        // 2. 将新头部位置加入数组
+        snake.unshift({ x: fingerPos.x, y: fingerPos.y });
+
+        // 3. 保持蛇的长度
+        // 注意：我们通过不移除尾部来增加长度，或者当长度超过设定值时移除尾部
+        while (snake.length > snakeLength) {
+            snake.pop();
+        }
+
+        // 4. 碰撞检测 (蛇头 vs 苹果)
+        const dx = fingerPos.x - apple.x;
+        const dy = fingerPos.y - apple.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        if (distance < (snakeRadius + apple.radius)) {
+            // 吃到苹果
+            score += 10;
+            scoreElement.innerText = score;
+            snakeLength += 5; // 变长
+            respawnApple();
+        }
+
+        // 5. 绘制蛇身
+        // 从尾部向头部绘制，这样头部会覆盖在最上面
+        for (let i = snake.length - 1; i >= 0; i--) {
+            const segment = snake[i];
+            const sizeRatio = 1 - (i / (snake.length + 5)); // 尾巴稍微小一点
+            const radius = snakeRadius * Math.max(0.5, sizeRatio);
+
+            canvasCtx.beginPath();
+            canvasCtx.arc(segment.x, segment.y, radius, 0, 2 * Math.PI);
+            
+            // 颜色渐变效果 (HSL)
+            const hue = (score * 2 + i * 2) % 360; 
+            canvasCtx.fillStyle = `hsl(${hue}, 70%, 50%)`;
+            canvasCtx.fill();
+            
+            if (i === 0) { // 头部加个眼睛
+                canvasCtx.fillStyle = 'white';
+                canvasCtx.beginPath();
+                canvasCtx.arc(segment.x - 5, segment.y - 5, 3, 0, 2 * Math.PI);
+                canvasCtx.arc(segment.x + 5, segment.y - 5, 3, 0, 2 * Math.PI);
+                canvasCtx.fill();
+            }
+        }
+    }
+
+    // --- MediaPipe 回调处理 ---
+    function onResults(results) {
+        // 隐藏加载动画
+        if (loadingElement.style.display !== 'none') {
+            loadingElement.style.display = 'none';
+            isGameActive = true;
+        }
+
+        // 1. 准备 Canvas
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        
+        // 2. 绘制视频背景 (关键：镜像处理)
+        // translate 和 scale 将坐标系水平翻转
+        canvasCtx.translate(canvasElement.width, 0);
+        canvasCtx.scale(-1, 1);
+        
+        // 保持视频比例覆盖全屏 (类似于 object-fit: cover)
+        // 计算绘制尺寸
+        const vidW = videoElement.videoWidth;
+        const vidH = videoElement.videoHeight;
+        const canvasW = canvasElement.width;
+        const canvasH = canvasElement.height;
+        
+        const scale = Math.max(canvasW / vidW, canvasH / vidH);
+        const drawW = vidW * scale;
+        const drawH = vidH * scale;
+        const offsetX = (canvasW - drawW) / 2;
+        const offsetY = (canvasH - drawH) / 2;
+
+        canvasCtx.drawImage(
+            results.image, 0, 0, vidW, vidH, 
+            offsetX, offsetY, drawW, drawH
+        );
+
+        // 3. 处理手部检测结果
+        canvasCtx.restore(); // 恢复正常坐标系用于绘制UI和游戏元素(为了逻辑清晰，我们在非镜像坐标下计算)
+
+        // 我们需要重新计算镜像后的坐标
+        // 如果视频是翻转画的，那么 MediaPipe 给出的 normalized x (0~1) 
+        // 对应屏幕上的像素应该是： (1 - x) * width
+        
+        let targetX = fingerPos.x; // 默认为上一次位置
+        let targetY = fingerPos.y;
+
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            // 获取第一只手
+            const landmarks = results.multiHandLandmarks[0];
+            // 获取食指指尖 (索引 8)
+            const indexFingerTip = landmarks[8];
+
+            // 坐标转换：
+            // MediaPipe x: 0(左) -> 1(右)
+            // 我们的背景翻转了，所以视觉上的"左"对应 MediaPipe 的 1，"右"对应 0
+            // 因此屏幕 x = (1 - landmark.x) * 屏幕宽
+            // 但考虑到 object-fit: cover 的偏移，需要更精确的映射
+            
+            // 简单的全屏映射 (忽略裁剪部分的微小误差，通常对于游戏够用了)
+            // 如果要非常精确，需要结合上面的 offsetX/drawW 计算
+            
+            // 还原到 drawImage 的坐标系
+            const pixelX_in_video = (1 - indexFingerTip.x) * drawW + offsetX; // 镜像翻转
+            const pixelY_in_video = indexFingerTip.y * drawH + offsetY;
+
+            targetX = pixelX_in_video;
+            targetY = pixelY_in_video;
+        }
+
+        // 4. 运行游戏逻辑循环
+        if (isGameActive) {
+            // 绘制半透明黑色蒙版，让视频稍微暗一点，凸显蛇
+            canvasCtx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+            canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            drawApple();
+            updateAndDrawSnake(targetX, targetY);
+        }
+    }
+
+    // --- MediaPipe 初始化 ---
+    const hands = new Hands({locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+    }});
+
+    hands.setOptions({
+        maxNumHands: 1, // 只检测一只手
+        modelComplexity: 1,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(onResults);
+
+    // --- 摄像头初始化 ---
+    const camera = new Camera(videoElement, {
+        onFrame: async () => {
+            await hands.send({image: videoElement});
+        },
+        width: 1280,
+        height: 720
+    });
+
+    // 启动摄像头
+    camera.start().catch(err => {
+        console.error("摄像头启动失败:", err);
+        loadingElement.innerText = "无法访问摄像头，请检查权限或设备。";
+    });
+
+</script>
+
+</body>
+</html>
