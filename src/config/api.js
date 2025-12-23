@@ -1,13 +1,13 @@
 // api.js
 const API_CONFIG = {
-  userService: 'http://localhost:8081',
-  healthService: 'http://localhost:8082',
-  medicalService: 'http://localhost:8083', // Java后端（保留不动）
-  soulService: 'http://localhost:8084',
-  healthScienceService: 'http://localhost:8085',
-  personalProfile: 'http://localhost:8086',
-  personalService: 'http://localhost:8087',
-  pythonMedicalService: 'http://localhost:8000' // Python后端端口（和后端127.0.0.1:8000一致）
+  userService: 'http://47.109.193.83:8081',
+  healthService: 'http://47.109.193.83:8082',
+  medicalService: 'http://47.109.193.83:8083', // Java后端（保留不动）
+  soulService: 'http://47.109.193.83:8084',
+  healthScienceService: 'http://47.109.193.83:8085',
+  personalProfile: 'http://47.109.193.83:8086',
+  personalService: 'http://47.109.193.83:8087',
+  pythonMedicalService: 'http://47.109.193.83:8000' // Python后端端口（和后端127.0.0.1:8000一致）
 }
 
 export const API_URLS = {
